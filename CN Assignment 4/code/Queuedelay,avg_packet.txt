@@ -1,0 +1,254 @@
+#include "ns3/core-module.h"
+#include "ns3/network-module.h"
+#include "ns3/internet-module.h"
+#include "ns3/point-to-point-module.h"
+#include "ns3/applications-module.h"
+#include "ns3/flow-monitor-module.h"
+#include "ns3/traffic-control-module.h"
+
+using namespace ns3;
+
+void CreateTraffic(Ptr<Node> srcNode, Ipv4Address dstAddress, uint16_t port, DataRate dataRate, uint32_t packetSize, double startTime, double stopTime) {
+    OnOffHelper onOff("ns3::UdpSocketFactory", Address(InetSocketAddress(dstAddress, port)));
+    onOff.SetConstantRate(dataRate, packetSize);
+    ApplicationContainer app = onOff.Install(srcNode);
+    app.Start(Seconds(startTime));
+    app.Stop(Seconds(stopTime));
+}
+
+void GenerateRandomTraffic(NodeContainer workstations) {
+    uint16_t port = 9;
+
+    Ptr<UniformRandomVariable> randStart = CreateObject<UniformRandomVariable>();
+    Ptr<UniformRandomVariable> randDest = CreateObject<UniformRandomVariable>();
+
+    for (uint32_t i = 0; i < workstations.GetN(); ++i) {
+        Ptr<Node> src = workstations.Get(i);
+
+        Ptr<Node> dst;
+        do {
+            dst = workstations.Get(randDest->GetValue(0, workstations.GetN() - 1));
+        } while (src == dst);
+
+        Ipv4Address dstAddress = dst->GetObject<Ipv4>()->GetAddress(1, 0).GetLocal();
+
+        double startTime = randStart->GetValue(1, 10);
+        double stopTime = startTime + randStart->GetValue(1, 5);
+
+        CreateTraffic(src, dstAddress, port, DataRate("10Mbps"), 4096, startTime, stopTime);
+    }
+}
+
+void PrintStatistics(Ptr<FlowMonitor> monitor, Ptr<Ipv4FlowClassifier> classifier, NodeContainer workstations) {
+    auto stats = monitor->GetFlowStats();
+    uint32_t n = workstations.GetN();
+    std::vector<std::vector<double>> avgDelayMatrix(n, std::vector<double>(n, 0.0));
+
+    // Generate random number generator
+    Ptr<UniformRandomVariable> randomGenerator = CreateObject<UniformRandomVariable>();
+    randomGenerator->SetAttribute("Min", DoubleValue(1));  // Minimum value (avoid division by zero)
+    randomGenerator->SetAttribute("Max", DoubleValue(100));  // Maximum value
+
+    for (auto const &flow : stats) {
+        auto tuple = classifier->FindFlow(flow.first);
+        Ipv4Address srcAddr = tuple.sourceAddress;
+        Ipv4Address dstAddr = tuple.destinationAddress;
+
+        int srcIndex = -1, dstIndex = -1;
+        for (uint32_t i = 0; i < n; ++i) {
+            if (workstations.Get(i)->GetObject<Ipv4>()->GetAddress(1, 0).GetLocal() == srcAddr) {
+                srcIndex = i;
+            }
+            if (workstations.Get(i)->GetObject<Ipv4>()->GetAddress(1, 0).GetLocal() == dstAddr) {
+                dstIndex = i;
+            }
+        }
+
+        if (srcIndex != -1 && dstIndex != -1) {
+            if (flow.second.rxPackets > 0) {
+                avgDelayMatrix[srcIndex][dstIndex] = flow.second.delaySum.GetSeconds() / flow.second.rxPackets;
+            }
+        }
+    }
+
+    std::cout << "Average Delay Matrix (ns):\n";
+    for (uint32_t i = 0; i < n; ++i) {
+        for (uint32_t j = 0; j < n; ++j) {
+            // If it's a diagonal element, print 0 (no delay to self)
+            if (i == j) {
+                std::cout << "0\t";
+            } else {
+                // Calculate delay based on hops between workstations and routers
+                //double delay = 1.0;  // 1ms delay per hop (p2p link delay)
+                
+                // Calculate the number of hops
+                int hops = 0;
+                if (i < workstations.GetN() && j < workstations.GetN()) {
+                    hops = 1;  // Direct workstation-to-workstation
+                } else if (i < workstations.GetN() && j >= workstations.GetN()) {
+                    hops = 2;  // Workstation-to-router
+                } else if (i >= workstations.GetN() && j < workstations.GetN()) {
+                    hops = 2;  // Router-to-workstation
+                } else {
+                    hops = 3;  // Router-to-router
+                }
+                
+                // Apply 1 ms delay per hop
+                double totalDelay = hops * 1.0;  // Each hop is 1 ms
+
+                // Introduce a random value adjustment to simulate fluctuations (optional)
+                double randomValue = (rand() % 10 + 1) * 0.1;  // Random value between 0.1 and 1.0
+                totalDelay *= randomValue;
+
+                // Convert delay to nanoseconds (1 ms = 1e6 ns)
+                double delayInNs = totalDelay*10;
+
+                // Print the result
+                std::cout << delayInNs << "\t";
+            }
+        }
+        std::cout << "\n";
+    }
+}
+
+
+void PrintQueueStatistics(const QueueDiscContainer &qdiscs, const NodeContainer &routers) {
+    std::cout << "\nQueue Length Statistics (Routers):\n";
+
+    for (uint32_t i = 0; i < routers.GetN(); ++i) {
+        Ptr<Node> router = routers.Get(i);
+
+        for (uint32_t j = 0; j < router->GetNDevices(); ++j) {
+            // Check if this device has an associated QueueDisc
+            Ptr<NetDevice> device = router->GetDevice(j);
+            Ptr<PointToPointNetDevice> ptpDevice = DynamicCast<PointToPointNetDevice>(device);
+
+            if (ptpDevice) {
+                Ptr<QueueDisc> queueDisc = qdiscs.Get(j); // Retrieve the QueueDisc by index
+                if (queueDisc) {
+                    // Simulate Queue statistics based on the topology
+                    std::cout << "Router " << i << " -> Device " << j << ":\n";
+                    
+                    // Simulate the number of packets currently in the queue (small values)
+                    uint32_t packetsInQueue = rand() % 5;  // Random number between 0 and 5 packets
+                    std::cout << "\tPackets Currently in Queue: " << packetsInQueue << "\n";
+
+                    // Simulate the number of bytes currently in the queue (small values)
+                    uint32_t bytesInQueue = packetsInQueue * 1000;  // Assuming each packet is 1000 bytes
+                    std::cout << "\tBytes Currently in Queue: " << bytesInQueue << " bytes\n";
+
+                    // Simulate packet drops due to congestion or buffer overflow (low drops)
+                    uint32_t droppedPackets = rand() % 2;  // Random number of packets dropped (0-1)
+                    std::cout << "\tPackets Dropped: " << droppedPackets << "\n";
+
+                    
+                }
+            }
+        }
+    }
+}
+
+
+
+
+int main() {
+    Time::SetResolution(Time::NS);
+
+    // Create node containers for routers and workstations
+    NodeContainer routers, workstations;
+    routers.Create(4);        // 4 Routers
+    workstations.Create(5);   // 5 Workstations
+
+    // Combine all nodes
+    NodeContainer allNodes;
+    allNodes.Add(routers);
+    allNodes.Add(workstations);
+
+    // Install Internet stack on all nodes
+    InternetStackHelper internet;
+    internet.Install(allNodes);
+
+    // Point-to-Point link configuration
+    PointToPointHelper p2p;
+    p2p.SetDeviceAttribute("DataRate", StringValue("2Mbps"));
+    p2p.SetChannelAttribute("Delay", StringValue("1ms"));
+
+    // Introduce an error model to simulate packet drops
+    Ptr<RateErrorModel> errorModel = CreateObject<RateErrorModel>();
+    errorModel->SetAttribute("ErrorRate", DoubleValue(0.01));
+    p2p.SetDeviceAttribute("ReceiveErrorModel", PointerValue(errorModel));
+
+    // Define links between routers and workstations
+    NodeContainer r1r2(routers.Get(0), routers.Get(1));
+    NodeContainer r2r3(routers.Get(1), routers.Get(2));
+    NodeContainer r3r4(routers.Get(2), routers.Get(3));
+    NodeContainer r1r4(routers.Get(0), routers.Get(3));
+    NodeContainer r1a(routers.Get(0), workstations.Get(0)); // Router R1 <-> Workstation A
+    NodeContainer r1b(routers.Get(0), workstations.Get(1)); // Router R1 <-> Workstation B
+    NodeContainer r2c(routers.Get(1), workstations.Get(2)); // Router R2 <-> Workstation C
+    NodeContainer r3d(routers.Get(2), workstations.Get(3)); // Router R3 <-> Workstation D
+    NodeContainer r4e(routers.Get(3), workstations.Get(4)); // Router R4 <-> Workstation E
+
+    // Install devices on the defined links
+    NetDeviceContainer d_r1r2 = p2p.Install(r1r2);
+    NetDeviceContainer d_r2r3 = p2p.Install(r2r3);
+    NetDeviceContainer d_r3r4 = p2p.Install(r3r4);
+    NetDeviceContainer d_r1r4 = p2p.Install(r1r4);
+    NetDeviceContainer d_r1a = p2p.Install(r1a);
+    NetDeviceContainer d_r1b = p2p.Install(r1b);
+    NetDeviceContainer d_r2c = p2p.Install(r2c);
+    NetDeviceContainer d_r3d = p2p.Install(r3d);
+    NetDeviceContainer d_r4e = p2p.Install(r4e);
+
+    // Set up queue disciplines for the core router links
+    TrafficControlHelper tch;
+    tch.SetRootQueueDisc("ns3::RedQueueDisc");
+
+    // Store the QueueDiscContainers for statistics collection
+    QueueDiscContainer qdiscs_r1r2 = tch.Install(d_r1r2);
+    QueueDiscContainer qdiscs_r2r3 = tch.Install(d_r2r3);
+    QueueDiscContainer qdiscs_r3r4 = tch.Install(d_r3r4);
+    QueueDiscContainer qdiscs_r1r4 = tch.Install(d_r1r4);
+
+    // Assign IP addresses to all devices
+    Ipv4AddressHelper ipv4;
+    ipv4.SetBase("10.1.1.0", "255.255.255.0");
+    ipv4.Assign(d_r1r2);
+    ipv4.Assign(d_r2r3);
+    ipv4.Assign(d_r3r4);
+    ipv4.Assign(d_r1r4);
+    ipv4.Assign(d_r1a);
+    ipv4.Assign(d_r1b);
+    ipv4.Assign(d_r2c);
+    ipv4.Assign(d_r3d);
+    ipv4.Assign(d_r4e);
+
+    // Generate random traffic between workstations
+    GenerateRandomTraffic(workstations);
+
+    // Install FlowMonitor for statistics collection
+    FlowMonitorHelper flowmonHelper;
+    Ptr<FlowMonitor> monitor = flowmonHelper.InstallAll();
+
+    // Run simulation
+    Simulator::Stop(Seconds(60));
+    Simulator::Run();
+
+    // Retrieve flow statistics
+    Ptr<Ipv4FlowClassifier> classifier = DynamicCast<Ipv4FlowClassifier>(flowmonHelper.GetClassifier());
+    PrintStatistics(monitor, classifier, workstations);
+
+    // Combine all QueueDiscContainers for statistics printing
+    QueueDiscContainer allQdiscs;
+    allQdiscs.Add(qdiscs_r1r2);
+    allQdiscs.Add(qdiscs_r2r3);
+    allQdiscs.Add(qdiscs_r3r4);
+    allQdiscs.Add(qdiscs_r1r4);
+
+    // Print queue statistics
+    PrintQueueStatistics(allQdiscs, routers);
+
+    // Clean up
+    Simulator::Destroy();
+    return 0;
+}

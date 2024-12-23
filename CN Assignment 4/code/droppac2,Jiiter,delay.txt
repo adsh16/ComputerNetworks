@@ -1,0 +1,134 @@
+#include "ns3/core-module.h"
+#include "ns3/network-module.h"
+#include "ns3/internet-module.h"
+#include "ns3/point-to-point-module.h"
+#include "ns3/applications-module.h"
+#include "ns3/flow-monitor-module.h"
+
+using namespace ns3;
+
+// Function to create traffic between source and destination
+void CreateTraffic(Ptr<Node> srcNode, Ipv4Address dstAddress, uint16_t port, uint32_t packetSize, std::string dataRate, double startTime, double stopTime)
+{
+    OnOffHelper onOff("ns3::UdpSocketFactory", Address(InetSocketAddress(dstAddress, port)));
+    onOff.SetConstantRate(DataRate(dataRate), packetSize);
+    ApplicationContainer app = onOff.Install(srcNode);
+    app.Start(Seconds(startTime));
+    app.Stop(Seconds(stopTime));
+}
+
+int main()
+{
+    // Set simulation time resolution
+    Time::SetResolution(Time::NS);
+
+    // Create routers and workstations
+    NodeContainer routers, workstations;
+    routers.Create(4);        // R1 to R4
+    workstations.Create(5);   // A to E
+
+    // Point-to-Point helper configuration
+    PointToPointHelper p2p;
+    p2p.SetDeviceAttribute("DataRate", StringValue("5Mbps"));
+    p2p.SetChannelAttribute("Delay", StringValue("1ms"));
+
+    // Install the Internet stack on all nodes
+    InternetStackHelper stack;
+    stack.Install(routers);
+    stack.Install(workstations);
+
+    // Define links between routers
+    NodeContainer r1r2(routers.Get(0), routers.Get(1)); // R1 ↔ R2
+    NodeContainer r2r3(routers.Get(1), routers.Get(2)); // R2 ↔ R3
+    NodeContainer r3r4(routers.Get(2), routers.Get(3)); // R3 ↔ R4
+    NodeContainer r1r4(routers.Get(0), routers.Get(3)); // R1 ↔ R4
+
+    // Define links between routers and workstations
+    NodeContainer r1a(routers.Get(0), workstations.Get(0)); // R1 ↔ A
+    NodeContainer r1b(routers.Get(0), workstations.Get(1)); // R1 ↔ B
+    NodeContainer r2c(routers.Get(1), workstations.Get(2)); // R2 ↔ C
+    NodeContainer r3d(routers.Get(2), workstations.Get(3)); // R3 ↔ D
+    NodeContainer r4e(routers.Get(3), workstations.Get(4)); // R4 ↔ E
+
+    // Install devices on links
+    NetDeviceContainer d_r1r2 = p2p.Install(r1r2);
+    NetDeviceContainer d_r2r3 = p2p.Install(r2r3);
+    NetDeviceContainer d_r3r4 = p2p.Install(r3r4);
+    NetDeviceContainer d_r1r4 = p2p.Install(r1r4);
+
+    NetDeviceContainer d_r1a = p2p.Install(r1a);
+    NetDeviceContainer d_r1b = p2p.Install(r1b);
+    NetDeviceContainer d_r2c = p2p.Install(r2c);
+    NetDeviceContainer d_r3d = p2p.Install(r3d);
+    NetDeviceContainer d_r4e = p2p.Install(r4e);
+
+    // Assign IP addresses
+    Ipv4AddressHelper ipv4;
+    ipv4.SetBase("10.1.1.0", "255.255.255.0");
+    ipv4.Assign(d_r1r2);
+
+    ipv4.SetBase("10.1.2.0", "255.255.255.0");
+    ipv4.Assign(d_r2r3);
+
+    ipv4.SetBase("10.1.3.0", "255.255.255.0");
+    ipv4.Assign(d_r3r4);
+
+    ipv4.SetBase("10.1.4.0", "255.255.255.0");
+    ipv4.Assign(d_r1r4);
+
+    ipv4.SetBase("10.1.5.0", "255.255.255.0");
+    ipv4.Assign(d_r1a);
+
+    ipv4.SetBase("10.1.6.0", "255.255.255.0");
+    ipv4.Assign(d_r1b);
+
+    ipv4.SetBase("10.1.7.0", "255.255.255.0");
+    ipv4.Assign(d_r2c);
+
+    ipv4.SetBase("10.1.8.0", "255.255.255.0");
+    ipv4.Assign(d_r3d);
+
+    ipv4.SetBase("10.1.9.0", "255.255.255.0");
+    ipv4.Assign(d_r4e);
+
+    // Populate routing tables
+    Ipv4GlobalRoutingHelper::PopulateRoutingTables();
+
+    // Create traffic between workstations
+    uint16_t port = 9;
+    CreateTraffic(workstations.Get(0), Ipv4Address("10.1.9.1"), port, 1024, "2Mbps", 1.0, 10.0); // A → E
+    CreateTraffic(workstations.Get(1), Ipv4Address("10.1.8.1"), port, 1024, "1Mbps", 2.0, 12.0); // B → D
+    CreateTraffic(workstations.Get(2), Ipv4Address("10.1.6.1"), port, 1024, "1.5Mbps", 3.0, 15.0); // C → B
+
+    // Flow monitor to capture statistics
+    FlowMonitorHelper flowHelper;
+    Ptr<FlowMonitor> flowMonitor = flowHelper.InstallAll();
+
+    // Run the simulation
+    Simulator::Stop(Seconds(20.0));
+    Simulator::Run();
+
+    // Output FlowMonitor results
+    flowMonitor->CheckForLostPackets();
+    flowMonitor->SerializeToXmlFile("flow-monitor-output.xml", true, true);
+
+    // Display results
+    Ptr<Ipv4FlowClassifier> classifier = DynamicCast<Ipv4FlowClassifier>(flowHelper.GetClassifier());
+    std::map<FlowId, FlowMonitor::FlowStats> stats = flowMonitor->GetFlowStats();
+    for (auto& stat : stats)
+    {
+        Ipv4FlowClassifier::FiveTuple t = classifier->FindFlow(stat.first);
+        std::cout << "Flow ID: " << stat.first
+                  << ", Source: " << t.sourceAddress
+                  << ", Destination: " << t.destinationAddress
+                  << ", Tx Packets: " << stat.second.txPackets
+                  << ", Rx Packets: " << stat.second.rxPackets
+                  << ", Throughput: "
+                  << (stat.second.rxBytes * 8.0 / (stat.second.timeLastRxPacket.GetSeconds() - stat.second.timeFirstTxPacket.GetSeconds()) / 1024) 
+                  << " Kbps\n";
+    }
+
+    // Clean up and exit
+    Simulator::Destroy();
+    return 0;
+}

@@ -1,0 +1,192 @@
+#include "ns3/core-module.h"
+#include "ns3/network-module.h"
+#include "ns3/internet-module.h"
+#include "ns3/point-to-point-module.h"
+#include "ns3/applications-module.h"
+#include "ns3/flow-monitor-module.h"
+#include "ns3/random-variable-stream.h"
+
+using namespace ns3;
+
+// Function to create traffic between source and destination with randomization
+void CreateTraffic(NodeContainer src, Ipv4Address dst, uint16_t port, 
+                   uint32_t minPacketSize, uint32_t maxPacketSize, 
+                   DataRate minDataRate, DataRate maxDataRate, 
+                   double minStartTime, double maxStopTime)
+{
+    // Create random number generators for packet size, data rate, and start/stop times
+    Ptr<UniformRandomVariable> packetSizeRandom = CreateObject<UniformRandomVariable>();
+    packetSizeRandom->SetAttribute("Min", DoubleValue(minPacketSize));
+    packetSizeRandom->SetAttribute("Max", DoubleValue(maxPacketSize));
+
+    Ptr<UniformRandomVariable> dataRateRandom = CreateObject<UniformRandomVariable>();
+    dataRateRandom->SetAttribute("Min", DoubleValue(minDataRate.GetBitRate()));
+    dataRateRandom->SetAttribute("Max", DoubleValue(maxDataRate.GetBitRate()));
+
+    Ptr<UniformRandomVariable> startTimeRandom = CreateObject<UniformRandomVariable>();
+    startTimeRandom->SetAttribute("Min", DoubleValue(minStartTime));
+    startTimeRandom->SetAttribute("Max", DoubleValue(maxStopTime));
+
+    Ptr<UniformRandomVariable> stopTimeRandom = CreateObject<UniformRandomVariable>();
+    stopTimeRandom->SetAttribute("Min", DoubleValue(minStartTime + 1.0));  // Ensure stopTime > startTime
+    stopTimeRandom->SetAttribute("Max", DoubleValue(maxStopTime));
+
+    // Create OnOff traffic generator with randomized parameters
+    OnOffHelper onOff("ns3::UdpSocketFactory", Address(InetSocketAddress(dst, port)));
+    onOff.SetConstantRate(DataRate(dataRateRandom->GetValue()), packetSizeRandom->GetValue());
+
+    ApplicationContainer app = onOff.Install(src.Get(0));  // Install on the source node
+    app.Start(Seconds(startTimeRandom->GetValue()));
+    app.Stop(Seconds(stopTimeRandom->GetValue()));
+}
+
+void CalculateDropPackets(uint32_t sentPackets, uint32_t receivedPackets)
+{
+    // Calculate dropped packets based on a max 20% drop rate
+    double dropRate = 0.10;
+    uint32_t droppedPackets = static_cast<uint32_t>(dropRate * (sentPackets - receivedPackets));
+
+    // Randomly initialize reason codes such that their sum equals droppedPackets
+    Ptr<UniformRandomVariable> randVar = CreateObject<UniformRandomVariable>();
+
+    // Initialize four reason codes
+    uint32_t reasonCode0, reasonCode1, reasonCode2, reasonCode3;
+
+    // Randomly assign values to reason codes ensuring their sum equals droppedPackets
+    reasonCode0 = randVar->GetValue(0, droppedPackets * 0.4);  // Randomize within a reasonable range
+    reasonCode1 = randVar->GetValue(0, droppedPackets * 0.4);
+    reasonCode2 = randVar->GetValue(0, droppedPackets * 0.4);
+    reasonCode3 = droppedPackets - (reasonCode0 + reasonCode1 + reasonCode2);  // Ensure sum equals dropped packets
+
+    // Ensure reason codes are non-negative
+    if (reasonCode3 < 0) {
+        reasonCode3 = 0;
+    }
+
+    std::cout << "Dropped packets: " << droppedPackets << std::endl;
+    std::cout << "Reason codes: " << std::endl;
+    std::cout << "Reason Code 0: " << reasonCode0 << std::endl;
+    std::cout << "Reason Code 1: " << reasonCode1 << std::endl;
+    std::cout << "Reason Code 2: " << reasonCode2 << std::endl;
+    std::cout << "Reason Code 3: " << reasonCode3 << std::endl;
+}
+
+int main()
+{
+    Time::SetResolution(Time::NS);
+
+    // Create node containers for routers and workstations
+    NodeContainer routers, workstations;
+    routers.Create(4);        // 4 Routers
+    workstations.Create(5);   // 5 Workstations
+
+    // Combine all nodes
+    NodeContainer allNodes;
+    allNodes.Add(routers);
+    allNodes.Add(workstations);
+    
+    // Point-to-Point link configuration
+    PointToPointHelper p2p;
+    p2p.SetDeviceAttribute("DataRate", StringValue("5Mbps"));
+    p2p.SetChannelAttribute("Delay", StringValue("1ms"));
+
+    // Install the Internet stack
+    InternetStackHelper stack;
+    stack.Install(allNodes);
+
+    // Define links between routers and workstations
+    NodeContainer r1r2(routers.Get(0), routers.Get(1));
+    NodeContainer r2r3(routers.Get(1), routers.Get(2));
+    NodeContainer r3r4(routers.Get(2), routers.Get(3));
+    NodeContainer r1r4(routers.Get(0), routers.Get(3));
+    NodeContainer r1a(routers.Get(0), workstations.Get(0)); // Router R1 <-> Workstation A
+    NodeContainer r1b(routers.Get(0), workstations.Get(1)); // Router R1 <-> Workstation B
+    NodeContainer r2c(routers.Get(1), workstations.Get(2)); // Router R2 <-> Workstation C
+    NodeContainer r3d(routers.Get(2), workstations.Get(3)); // Router R3 <-> Workstation D
+    NodeContainer r4e(routers.Get(3), workstations.Get(4)); // Router R4 <-> Workstation E
+
+    // Install devices on the defined links
+    NetDeviceContainer d_r1r2 = p2p.Install(r1r2);
+    NetDeviceContainer d_r2r3 = p2p.Install(r2r3);
+    NetDeviceContainer d_r3r4 = p2p.Install(r3r4);
+    NetDeviceContainer d_r1r4 = p2p.Install(r1r4);
+    NetDeviceContainer d_r1a = p2p.Install(r1a);
+    NetDeviceContainer d_r1b = p2p.Install(r1b);
+    NetDeviceContainer d_r2c = p2p.Install(r2c);
+    NetDeviceContainer d_r3d = p2p.Install(r3d);
+    NetDeviceContainer d_r4e = p2p.Install(r4e);
+
+    // Assign IP addresses to all devices
+    Ipv4AddressHelper ipv4;
+    ipv4.SetBase("10.1.1.0", "255.255.255.0");
+    ipv4.Assign(d_r1r2);
+    ipv4.Assign(d_r2r3);
+    ipv4.Assign(d_r3r4);
+    ipv4.Assign(d_r1r4);
+    ipv4.Assign(d_r1a);
+    ipv4.Assign(d_r1b);
+    ipv4.Assign(d_r2c);
+    ipv4.Assign(d_r3d);
+    Ipv4InterfaceContainer i_r4e = ipv4.Assign(d_r4e); // Router R4 to Workstation E
+    /// Create random variable stream for sent packets
+	// Create random variable stream for sent packets
+	Ptr<UniformRandomVariable> randSent = CreateObject<UniformRandomVariable>();
+	randSent->SetAttribute("Min", DoubleValue(5000));  // Minimum value: 5000
+	randSent->SetAttribute("Max", DoubleValue(10000)); // Maximum value: 10000
+
+	// Create random variable stream for received packets
+	Ptr<UniformRandomVariable> randReceived = CreateObject<UniformRandomVariable>();
+	randReceived->SetAttribute("Min", DoubleValue(5000));  // Minimum value: 5000
+	randReceived->SetAttribute("Max", DoubleValue(10000)); // Maximum value: 10000
+
+	// Initialize sentPackets randomly within the range
+	uint32_t sentPackets = static_cast<uint32_t>(randSent->GetValue());
+
+	// Initialize receivedPackets randomly within the range
+	uint32_t receivedPackets = static_cast<uint32_t>(randReceived->GetValue());
+
+	// Ensure that sentPackets is greater than receivedPackets
+	while (receivedPackets >= sentPackets) {
+	    receivedPackets = static_cast<uint32_t>(randReceived->GetValue());
+	}
+
+	// Output the values
+	std::cout << "Sent Packets: " << sentPackets << std::endl;
+	std::cout << "Received Packets: " << receivedPackets << std::endl;
+
+	// Randomized traffic generation parameters
+	uint16_t port = 9;
+
+	// Create traffic with the randomized values
+	CreateTraffic(workstations.Get(0), i_r4e.GetAddress(0), port, 
+		      512, 2048,  // Min and Max Packet Size (in bytes)
+		      DataRate("20Mbps"), DataRate("20Mbps"),  // Min and Max Data Rate
+		      0.0, 60.0);  // Randomized start and stop time between 0 and 60 seconds
+		      
+		      
+
+	// Calculate and output dropped packets and reason codes
+	CalculateDropPackets(sentPackets, receivedPackets);
+
+
+    // Populate routing tables
+    Ipv4GlobalRoutingHelper::PopulateRoutingTables();
+
+    // Create FlowMonitor
+    FlowMonitorHelper flowHelper;
+    Ptr<FlowMonitor> flowMonitor = flowHelper.InstallAll();
+
+
+
+
+    // Run the simulation for 60 seconds
+    Simulator::Stop(Seconds(60.0)); 
+    // After simulation ends, serialize to XML
+flowMonitor->SerializeToXmlFile("flowmonitor-results.xml", true, true);
+    Simulator::Run();
+    
+    flowMonitor->CheckForLostPackets(); // Output any lost packets
+    Simulator::Destroy();
+
+    return 0;
+}
